@@ -1,5 +1,10 @@
 # Stage 4 — The carry sleeves: FX and commodity term structure
 
+> **Dropped from V1 (user decision, 2026-09-29).** V1 trades equity, duration and short variance only.
+> This design is kept as the V2 starting point and is not built. It was written for five sleeves; the
+> breadth problem it describes is the whole-contract problem V1 now
+> handles (`docs/03-optimiser.md`, "Whole contracts").
+
 **Deliverable:** the FX carry and commodity carry streams under the ledger contract, their marginal
 Sharpe against the stage-2 portfolio on the fit split, and the breadth gate decided for commodity carry.
 

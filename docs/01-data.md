@@ -1,70 +1,58 @@
-# Stage 1 — Data and splits
+# Stage 1 — Data and the window
 
 **Deliverable:** every series catalogued in `data/catalogue.json` with source, sha256, record count,
-date range and cost; realised variance of ES computed from intraday bars; **the split registered in
-`STATUS.md` before the first sleeve is built**.
+date range and cost; history depths confirmed; ES realised variance computed; **the window registered in
+`STATUS.md` before any sleeve return is computed**.
 
 ## Sources
 
-Price before pulling, every time, and record the price. On the GLBX plan the answer is $0.00, and the
-catalogue records that it was checked rather than assumed.
+Price before pulling, every time, and record the price. On the GLBX plan the answer is $0.00; the
+catalogue records that it was checked.
 
-| series | source | schema / form | use | history to confirm |
+| series | source | schema / form | use | to confirm |
 |---|---|---|---|---|
-| ES, MES futures, all expiries | Databento GLBX.MDP3 | `definition`, `statistics` (settlement, OI), `ohlcv-1d` | equity sleeve; hedge leg of short variance | GLBX from mid-2010 (MBO only from 2017, not needed) |
-| ES 1-minute bars | Databento GLBX.MDP3 | `ohlcv-1m` | realised variance, the HAR-RV forecast | as above |
-| ES and MES options on futures, all strikes and expiries | Databento GLBX.MDP3 | `definition`, `statistics` (settlement), `ohlcv-1d` | short-variance sleeve | ES options from mid-2010; MES options from 2020 |
-| ZF, ZN futures | Databento GLBX.MDP3 | as ES | duration sleeve | mid-2010 |
-| FX futures: 6E, 6B, 6J, 6A, 6C, 6S and their micros | Databento GLBX.MDP3 | as ES, front and second expiry | FX carry; the calendar spread is the carry | mid-2010 (micros later) |
-| Commodities: CL, NG, GC, SI, HG, ZC, ZW, ZS, and micros where listed | Databento GLBX.MDP3 | as ES, front and second expiry | commodity carry | mid-2010 |
-| Daily market excess return and risk-free rate, 1926– | Ken French data library | CSV | the equity constant-mean prior; the long benchmark history | complete |
-| Treasury constant-maturity yields, 1962– | FRED (DGS2, DGS5, DGS10) | CSV | the duration prior; the pre-2010 bond return proxy | complete |
-| VIX, daily close | Cboe | CSV | the implied side of the variance premium; a cross-check of the straddle's own implied vol | 1990– |
-| Cboe PUT and BXM index levels | Cboe | CSV | the stage-3 cross-check | 1986– (backfilled) |
-| VIX futures settlements | Cboe historical files, or the vendor if it carries CFE | CSV | the VIX-future arm of stage 3 only | 2004– |
-| Central-bank policy rates, G10 | FRED / BIS | CSV | a cross-check of the FX carry read off the calendar spread | complete |
+| ES, MES futures, all expiries | Databento GLBX.MDP3 | `definition`, `statistics` (settlement, OI), `ohlcv-1d` | equity sleeve; the straddle hedge | ES from mid-2010; MES from 2019-05 |
+| ES 1-minute bars | Databento GLBX.MDP3 | `ohlcv-1m` | realised variance, HAR-RV | from mid-2010 |
+| ES and MES options, all strikes and expiries | Databento GLBX.MDP3 | `definition`, `statistics`, `ohlcv-1d` | short-variance sleeve | ES options mid-2010; MES options 2020 |
+| Option quotes near 15:00 CT, if `statistics` has no bid–ask | Databento GLBX.MDP3 | a quote schema, priced first | option half-spreads | whether it is needed at all |
+| ZN, ZF futures | Databento GLBX.MDP3 | as ES | duration stream in fit; the fallback instrument | mid-2010 |
+| Micro Treasury yield futures (10Y; 5YY as an alternative) | Databento GLBX.MDP3 | as ES | the traded duration instrument | listed 2021; symbols from `definition` |
+| Daily market excess return, risk-free rate | Ken French library | CSV | equity prior; cash rate | 1926– |
+| Treasury constant-maturity yields | FRED (DGS2, DGS5, DGS10) | CSV | duration prior | 1962– |
+| VIX daily close | Cboe | CSV | the implied side of the VRP; a check on the straddle's own IV | 1990– |
+| Cboe PUT index | Cboe | CSV | the stage-2 cross-check of option settlement handling | 1986– |
 
-Realised variance: sum of squared 5-minute log returns of the front ES contract over the RTH session plus
-the squared overnight return, per day. The 1-minute bars are the source; 5-minute sampling is the
-choice that trades microstructure noise against sample size, and stage 1 reports the 1-, 5- and
-15-minute versions side by side so the choice is visible.
+**Realised variance:** the sum of squared 5-minute log returns of the front ES contract over RTH, plus
+the squared overnight return, per day. The 1-, 5- and 15-minute versions are reported side by side so the
+sampling choice is visible.
 
-## The split
+## The window
 
-Proposed in `STATUS.md` and registered there by this stage, before any sleeve exists:
+Registered in `STATUS.md` by this stage, before any return is computed:
 
-- **fit:** 2010-06-01 to 2017-12-31;
-- **validate:** 2018-01-01 to 2021-12-31;
-- **sealed:** 2022-01-01 to the start of the forward walk.
+- **fit:** 2010-06-01 to 2021-06-30;
+- **backtest:** 2021-07-01 to 2026-06-30;
+- **rehearsal:** 2026-07-01 to the walk's start.
 
-Why these edges: validate holds the two fastest vol events of the era (2018-02, 2020-03), which are
-what the short-variance sleeve must survive; sealed holds 2022, the joint equity–bond drawdown 60/40
-must survive. The fit split's own stress days are 2011-08, 2015-08 and 2016-02, which are milder. That
-asymmetry is deliberate and stated: **the tail the bootstrap sees in fitting is smaller than the tail
-the gates test.**
-
-The long histories (French, FRED) are used only to set constant-mean priors, and the priors are fixed
-and written into `artifacts/moments/v1` before validate is opened.
+**The date guard.** Every runner takes a `--phase` (fit, backtest, rehearsal). A fit-phase runner raises
+on any *return or performance* read past 2021-06-30, and there is no override flag. Two reads are
+exempt, and are named in the guard's code rather than toggled: construction checks that compare prices
+without computing a strategy's P&L (micro yield vs ZN tracking, MES vs ES settlement), and the annual
+refit, which reads through its own 30 June.
 
 ## Catalogue rules
 
-Carried over from MarketMaker's stage 1, where they were paid for:
+Carried over from MarketMaker's stage 1:
 
-1. Every series has an id, a source URL or dataset/schema/symbol triple, a date range, a record count, a
-   sha256 of the file on disk, and the cost of the request.
-2. `make data` prices, then pulls, then hashes; a file whose hash changes on re-pull is an incident.
-3. Writing the catalogue refuses to drop a series or change a series' schema without `--force` and a
-   reason (MarketMaker's manifest clobber, 2026-09-26).
-4. Every runner refuses sealed dates by name. There is no flag to override it.
-5. Missing settlements, holidays and short sessions are flagged in the ledger record, never imputed
-   silently. The 40%-of-median record-count rule flags a short day.
-
-## What this stage does not do
-
-- It does not build a sleeve. It does not compute a return.
-- It does not choose the HAR-RV lags or the EWMA half-life; those are stage 5's, fitted on fit only.
+1. Every series has an id, a dataset/schema/symbol triple or URL, a date range, a record count, a sha256,
+   and the request's cost.
+2. `make data` prices, pulls, then hashes; a hash that changes on re-pull is an incident.
+3. Writing the catalogue refuses to drop a series or change its schema without `--force` and a reason.
+4. Missing settlements, holidays and short sessions are flagged, never imputed silently. A day with under
+   40% of the median record count is flagged short.
 
 ## Next action
 
-Price one day of each series (a `definition` and a `statistics` request per product), confirm the
-history depths in the table, and write the catalogue skeleton with those answers before pulling.
+Price one day of each GLBX product (a `definition` and a `statistics` request each), confirm the depths
+and the micro yield symbols, answer the option bid–ask question, and write the catalogue skeleton before
+pulling anything in bulk.

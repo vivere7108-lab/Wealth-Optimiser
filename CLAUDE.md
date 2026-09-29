@@ -1,7 +1,9 @@
 # Wealth Optimiser — session entry point
 
 The unified wealth problem: maximise the long-run growth rate of a $50k account, net of the cost of
-trading, over a small set of return streams ("sleeves") expressed in futures and index options.
+trading, over three return streams ("sleeves"): equity (MES), duration (micro yield futures or ZN), and
+short variance (delta-hedged MES straddles). V1 delivers a forward-walkable daily function, `decide()`,
+and a five-year backtest of that same function.
 Opened 2026-09-29 after the market-making line (`vivere7108-lab/MarketMaker`) closed. That project's
 microstructure record is this project's cost model, and its validation discipline is this project's
 discipline. Its assessment (`MarketMaker/docs/11-assessment.md`) is the reason this repo exists.
@@ -36,10 +38,12 @@ that purpose.
 ```bash
 make py-test    # cd research && uv run pytest
 make lint       # ruff over research/
-make data       # price, then pull, every catalogued series (refuses sealed dates by name)
+make data       # price, then pull, every catalogued series (prices first; hashes every file)
 make ledger     # rebuild every sleeve's return stream from raw prices; hashes recorded
 wo check <sleeve|moments|policy> PATH    # validate an artifact before it is used
-wo replay --config CFG --out DIR         # the full stack on the ledger, journal out
+wo decide --date D                       # one day's decision, printed (what the live loop runs)
+wo backtest --config CFG --out DIR       # decide() daily over the backtest window, journal out
+wo live --paper|--live                   # the forward walk against IBKR
 ```
 
 ## Non-negotiable rules
@@ -60,22 +64,24 @@ assumption moved results more than any signal did.
    premia quoted as prices (the variance premium, carry) at the horizon they are quoted. **Every
    conditional mean ships beside its constant-mean control**, and replaces it only by a
    pre-registered held-out gate.
-5. **Held-out and sealed periods, pre-registered** in `STATUS.md` before any stream is built.
-   Validate is read once per gate. The sealed period is opened once, by the sign-off script.
+5. **The window is pre-registered** in `STATUS.md` before any return is computed: fit 2010-06 to
+   2021-06, backtest 2021-07 to 2026-06. Fit-phase runners refuse backtest-period returns by name.
+   Every backtest run is numbered and logged; the report states how many looks there were.
 6. **One construction per sleeve.** Each return stream is built once, by one code path, from raw
    prices, with its own costs, and cross-checked against a published index where one overlaps. No
    sleeve enters the ledger from a vendor's index alone: the stream we trade is the stream we fit.
 7. **Instruments are chosen by the cost model, not by preference.** An instrument enters with its
    exposure map, its all-in cost per side, its margin, and its worst-day loss, each with a named
-   source in the instrument table (`docs/06-instruments-execution.md`). Fees are read from the
+   source in the instrument table (`docs/05-forward-walk.md`). Fees are read from the
    schedule, never assumed.
 
 ## Layout (intended; stage 0 creates it)
 
 ```
 research/    Python 3.13 via uv
-  src/wo/{ledger,data,sleeves,moments,optimiser,instruments,replay}.py
-  tools/     one runner per stage, each refusing sealed dates by name
+  src/wo/{data,sleeves,moments,optimiser,contracts,decide,backtest}.py
+  src/wo/live/   the IBKR adapter, guards, reconciliation (from MarketMaker's TWS code)
+  tools/     one runner per stage, each taking --phase and enforcing the date guard
   tests/
 artifacts/   fitted parameters and policies, versioned and immutable, each with a manifest
 data/        catalogue only (manifests with sha256, counts, cost); files live under /home/bread/wo-data
@@ -91,6 +97,10 @@ docs/        the problem statement and one doc per stage
 - Python 3.13 via uv. The system Python 3.14 is not used.
 - The account is $50k at IBKR. Futures margin is whatever the broker's page says on the day; portfolio
   margin is unavailable below its minimum, so ETF leverage is Reg T's 2× and the delta lives in futures.
+- Leverage is bounded by the per-session loss cap `D` = 10% of NAV; margin is only a feasibility cap,
+  `M` = 50% of NAV. At $50k one contract is about one sleeve's risk budget, so holdings are integers
+  chosen by the objective, and every result is reported at both fractional and integer sizing
+  (`docs/03-optimiser.md`, "Whole contracts").
 - MarketMaker's measured execution costs, reused here as the cost model's ES row: all-in fee $2.24 a side
   on ES (0.179 ticks) and $0.62 on MES (0.496 ticks); a 1-lot posted at the ES touch nets −0.26 ticks at
   5 s, crossing nets −0.68 (`MarketMaker/STATUS.md`, Result log 2026-09-27).

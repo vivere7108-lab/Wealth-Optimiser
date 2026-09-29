@@ -1,118 +1,128 @@
 # V1 plan — Wealth Optimiser
 
-**Goal of V1:** a daily-rebalanced portfolio of futures and index options on a $50k account, sized by a
-growth-rate optimiser with a cost model, that (1) reproduces every earlier finding with standard errors on
-one common sample, (2) beats buy-and-hold, 60/40 and vol-scaled equity on held-out data, paired by year,
-by a margin stated with its t and its test count, and (3) in a forward walk realises the costs, exposures
-and per-sleeve returns the replay predicted.
+**V1 delivers two things:**
 
-**One-line thesis:** every earlier experiment — buy and hold, 60/40, the Kalman allocation, vol-scaled
-Kelly, short vol — computed the same operator, inverse covariance times conditional mean, with a different
-choice of what was constant and what was conditional. V1 makes that choice explicit per input, by
-identifiability, and adds the two things the experiments lacked: a cost model and a tail-aware sizing rule.
+1. **A forward-walkable algorithm.** One daily function, `decide()`, that takes the data through
+   today's settlement and the account's current holdings and returns target whole-contract holdings
+   across three sleeves (equity, duration, short variance). It is sized by a growth-rate optimiser with
+   a cost model and a per-session loss cap, and it places its own orders through the IBKR API.
+2. **A five-year backtest of that same function**, 2021-07-01 to 2026-06-30, against buy-and-hold,
+   60/40 and vol-scaled equity. It is reported by year with standard errors, costs, drawdowns and each
+   sleeve's marginal contribution.
+
+**Why the two are one piece of code:** the backtest calls `decide()` once a day over history, and the walk
+calls it once a day live. A trade that exists in one exists in the other, so the walk's first job is
+to confirm that the backtest's costs and exposures were real.
+
+**Thesis:** every earlier experiment (buy and hold, 60/40, the Kalman allocation, vol-scaled Kelly, short
+vol) computed the same operator, inverse covariance times mean, with a different choice of what was held
+constant. V1 holds the means constant where the data cannot identify them, forecasts the variances
+daily where it can, sizes on the joint tails rather than a Gaussian, and pays for every trade.
 
 ## The problem
 
 ```
-maximise over w_t:   g = E[ log(1 + w_t' r_{t+1}) ] - cost(w_t - w_{t-1}, s_t)
-subject to:          gross leverage <= L,   worst one-interval loss <= D
-to second order:     g ~ w' mu(s) - 1/2 w' Sigma(s) w   so   w* = Sigma(s)^-1 mu(s)
+maximise over w_t:   g = E[ log(1 + w_t' r_{t+1}) ] - cost(h_t - h_{t-1})
+subject to:          worst one-session loss(h_t) <= D = 10% of NAV     (bounds leverage)
+                     initial margin(h_t)         <= M = 50% of NAV     (broker feasibility)
+                     h_t whole contracts, chosen near w_t by the same objective
+to second order:     w* = Sigma(s)^-1 mu(s)      (the sanity check, not the solver)
 ```
 
-`r` is the vector of the sleeves' daily excess returns, `s` the state they are conditioned on, `w` the
-exposures. The three inputs are `mu(s)`, `Sigma(s)` and the cost of moving. Notation, the ledger contract
-and the mapping of every earlier finding onto this problem are in `docs/00-problem.md`.
+`r` is the vector of the sleeves' daily excess returns, `w` the fractional exposures per dollar of NAV,
+`h` the contracts actually held. Notation and the daily record every sleeve publishes are in
+`docs/00-problem.md`.
 
 ## The sleeves
 
-| sleeve | premium, and who pays it | V1 instrument at $50k | `mu` treatment | `Sigma` treatment | V1 status |
-|---|---|---|---|---|---|
-| Equity index | equity premium; investors buying safety | MES, then ES above ~$150k | constant prior from the long history; a VRP-conditioned mean is tested in stage 5 against it | daily forecast from ES intraday realised variance | traded |
-| Duration | term premium; the 60/40 diversifier | ZF or ZN | constant prior | daily forecast | traded |
-| Short variance | variance premium; hedgers buying insurance | delta-hedged short straddle on MES options, 20–45 DTE, hedged with MES; a defined-risk variant and a back-month VIX future run as ledger arms | VRP-conditioned, gated against constant | own forecast plus joint bootstrap tails | traded if stage 3 passes |
-| FX carry | interest differential; crash-risk bearing | micro FX futures, G10, long high carry / short low carry, carry read off the calendar spread | the carry signal is the mean, scaled by a constant fitted on the fit split | daily forecast; joint tails | traded at micro size if stage 4 passes |
-| Commodity carry | term-structure premium (backwardation); hedging pressure | micro metals and energy where listed | the carry signal is the mean | daily forecast; joint tails | **measured** in V1; traded only if the breadth gate in `docs/04-carry.md` passes |
+| sleeve | premium | traded in | mean | variance and tails |
+|---|---|---|---|---|
+| Equity | equity risk premium | MES | constant prior from the French library (1926 to fit end) | daily HAR-RV forecast from ES 1-minute bars |
+| Duration | term premium | micro Treasury yield futures (10Y) if their tracking against ZN passes; else ZN | constant prior from FRED yields (1962 to fit end) | daily EWMA forecast |
+| Short variance | variance risk premium | delta-hedged short ATM straddle on MES options, 20–45 DTE; the delta is netted into the MES position | constant; a VRP-conditioned mean replaces it only through one pre-registered test | own EWMA forecast; tails from a block bootstrap of the joint history |
 
-Dropped from V1 by decision (2026-09-29): the pairs leg and composition tilts. Execution therefore stays
-in futures and index options.
+A **defined-risk** variant of the straddle (long 10-delta wings) runs beside it as the one alternative
+construction. Its worst session is bounded by the contract terms, which is the cheapest way to honour
+`D`. The backtest decides between the two on net growth.
 
-## Pipeline
+## The window (to be registered in `STATUS.md` by stage 1, before any return is computed)
+
+| period | dates | use |
+|---|---|---|
+| fit | 2010-06-01 to 2021-06-30 | every design choice and every initial parameter; contains 2011-08, 2015-08, 2018-02, 2020-03 |
+| backtest | 2021-07-01 to 2026-06-30 | five years, read with the configuration frozen; contains 2022 (joint equity–bond drawdown), 2024-08, 2025-04 |
+| rehearsal | 2026-07-01 to the walk's start | the live code path run on recent days, paper only; the parity check before real orders |
+
+**Refit rule:** parameters (priors, variance models, bootstrap sample) are refit every 1 July on all data
+up to that date, the expanding window the live walk will use. The *design* (sleeves, constructions,
+objective, `D`, `M`, Kelly fraction) is frozen at the end of fit and is not changed by what the backtest
+shows without a logged new run (see "Looks" below).
+
+**Why this split:** the fit period holds the two fastest vol crashes of the era, so the short-variance
+sizing has seen them. The backtest holds 2022, which 60/40 must survive. MES options (listed 2020) and
+micro yield futures (2021) trade throughout the backtest, so it runs on the contracts the account will
+hold, with no hypothetical lot sizes.
+
+**Looks:** the first full backtest run is `bt-v1`. Any later run after a change is `bt-v2`, `bt-v3`
+and so on. Every run is logged with what changed, and the report states the number of looks. Five years
+gives df = 4 by year; **the backtest can show behaviour (drawdowns, costs, turnover, marginal
+contribution) with SEs, but it cannot prove outperformance, and no report claims it does.**
+
+## Architecture
 
 ```
-[DATA]  GLBX daily settlements + intraday bars (ES, ZF/ZN, MES options, FX, commodities)
-        Ken French daily market factor; FRED rates; Cboe VIX, PUT, BXM
-             |
-             v
-[LEDGER]  one contract per sleeve: daily excess return + cost + margin + exposure map
-          equity | duration | short variance | FX carry | commodity carry
-             |
-             v
-[MOMENTS]  mu(s): constant priors; VRP-conditioned where gated; carry signals
-           Sigma(s): daily variance forecasts; EWMA correlations on vol-normalised sleeves
-           tails: block bootstrap of the joint fit sample
-             |
-             v
-[OPTIMISER]  max E[log(1 + w'r)] - cost;  fractional Kelly;  leverage cap L;  loss cap D
-             |
-             v
-[INSTRUMENTS + EXECUTION]  exposures -> contracts at $50k; roll calendar; post-vs-cross rule
-             |
-             v
-[REPLAY | FORWARD WALK]  the same journal from both
+[DATA]      GLBX settlements + ES 1-min bars; French; FRED; Cboe VIX, PUT     (catalogued, hashed)
+    |
+[SLEEVES]   equity | duration | short variance (+ defined-risk arm)           (daily records, unit exposure)
+    |
+[MOMENTS]   constant means; daily variance forecasts; joint block bootstrap   (refit each 1 July)
+    |
+[OPTIMISER] half-Kelly log growth on the bootstrap, minus cost, under D and M -> fractional w*
+    |
+[CONTRACTS] w* -> whole contracts by the same objective; straddle delta netted into MES
+    |
+decide(date, data_through_close, holdings) -> target holdings      <- one function
+    |                                   |
+[BACKTEST] loops it, fills at        [LIVE] runs it after the 15:00 CT settlement,
+settlement + cost model              places orders via IBKR, reconciles, reports
 ```
-
-## Stack decision (settled 2026-09-29)
-
-- **Python 3.13 only for V1.** The rebalance is daily, the heaviest computation is realised variance
-  from 1-minute bars, and a block bootstrap of 20 years of daily returns is seconds. MarketMaker's C++
-  book existed for 4 M events/s; nothing here needs it.
-- **JSON configs and artifacts, each with a manifest** (git sha, fit period, fitted_at) and a hash of
-  its inputs, so a run is reproducible from the catalogue.
-- **The live path is decided in stage 8.** MarketMaker's TWS plumbing is the candidate; a daily
-  rebalance may not need it.
 
 ## Stages
 
-Each stage ends at a stated, checkable deliverable. Do not start a stage before its predecessor's
-deliverable is checked in and recorded in `STATUS.md`.
+Each stage ends at a checkable deliverable recorded in `STATUS.md`. Do not start a stage before its
+predecessor's deliverable is checked in.
 
 | # | Stage | Deliverable | Doc | Est. |
 |---|---|---|---|---|
-| 0 | Scaffold + ledger contract | `research/` builds, `make py-test` and `make lint` run, the sleeve record and manifest contracts enforced by tests | `docs/00-problem.md` | 1 session |
-| 1 | Data + splits | every series catalogued with sha256, counts and cost; **the fit / validate / sealed split registered in `STATUS.md` before any stream is built**; realised variance from ES bars | `docs/01-data.md` | 1–2 sessions + downloads |
-| 2 | Benchmarks with SEs | buy-and-hold, 60/40 and vol-scaled equity on the ledger, paired by year, on the fit split; the earlier findings reproduced or the discrepancy explained | `docs/02-benchmarks.md` | 1 session |
-| 3 | Short-variance sleeve | the delta-hedged straddle stream built from option settlements with own costs, cross-checked against Cboe PUT/BXM; the VRP-conditioned mean gated on validate; the tail arms | `docs/03-short-variance.md` | 2–3 sessions |
-| 4 | Carry sleeves | FX and commodity carry streams; marginal Sharpe of each against the stage-2 portfolio; the breadth gate decided | `docs/04-carry.md` | 1–2 sessions |
-| 5 | Moments + optimiser | `artifacts/moments/v1`, `artifacts/policy/v1`; sanity checks pass; the equity-only case reproduces vol-scaling | `docs/05-optimiser.md` | 2 sessions |
-| 6 | Instruments, costs, replay | exposure map to contracts; the instrument table with sources; `wo replay` on the ledger with every cost; journal | `docs/06-instruments-execution.md` | 2 sessions |
-| 7 | Validation | the full stack against the three benchmarks on validate, paired by year; marginal contribution of each sleeve; sealed untouched | `docs/07-validation.md` | 1 session |
-| 8 | Forward walk | small size, daily report of realised vs predicted cost, exposure and per-sleeve return | `docs/06-instruments-execution.md` | ongoing |
+| 0 | Scaffold | `research/` builds; `make py-test`, `make lint`; the daily sleeve record, manifests and the date guard enforced by tests | `docs/00-problem.md` | 1 session |
+| 1 | Data | every series catalogued with sha256, counts and cost; history depths confirmed; the window registered; ES realised variance | `docs/01-data.md` | 1–2 sessions + downloads |
+| 2 | Sleeves | the three streams (and the defined-risk arm) built from settlements with own costs; the PUT rebuild cross-check; MES-vs-ES and micro-yield-vs-ZN tracking; fit-period stats with SEs | `docs/02-sleeves.md` | 2–3 sessions |
+| 3 | Optimiser | moments, bootstrap, sizing under `D` and `M`, the whole-contract rule, `decide()`; sanity checks pass on fit | `docs/03-optimiser.md` | 2 sessions |
+| 4 | Backtest | `bt-v1`: `decide()` daily over 2021-07 to 2026-06 against the three benchmarks; the report by year | `docs/04-backtest.md` | 1–2 sessions |
+| 5 | Forward walk | the IBKR adapter, guards and daily report; rehearsal on paper, then live at reduced size | `docs/05-forward-walk.md` | 1–2 sessions + ongoing |
 
-Rough total before the walk: **12–15 working sessions**.
+Rough total before live orders: **8–11 working sessions**.
 
-## What V1 deliberately does not include
+## Not in V1
 
-1. The pairs leg and any composition tilt (user decision, 2026-09-29).
-2. Single-name options, and market making of any kind (closed in MarketMaker).
-3. Any intraday signal as a strategy. Dealer gamma enters only as a covariate test in stage 5, gated.
-4. More than one live short-variance structure. The ledger picks one; the others stay as measured arms.
-5. Commodity carry as a traded sleeve unless the breadth gate passes.
-6. Anything learned online. Every parameter is fitted offline on the fit split and shipped as an artifact.
-7. Tax modelling. Section 1256 treatment is noted in the instrument table, not optimised for.
+1. FX carry and commodity carry (dropped 2026-09-29; design kept in `docs/v2-carry.md`).
+2. The pairs leg, composition tilts, single-name options, market making of any kind.
+3. Intraday signals, dealer gamma, a VRP-conditioned *equity* mean, the Kalman reproduction.
+4. Straddle arms beyond the defined-risk variant (strangle, VIX futures): V2.
+5. Anything learned online. Parameters change only at the annual refit.
+6. Tax modelling. Section 1256 treatment is noted, not optimised.
 
-## Open questions, to resolve in the stage that needs them
+## Open questions, resolved in the stage named
 
-- **Is there a published S&P 500 delta-hedged straddle index?** None is known to this plan. Cboe's
-  strategy benchmarks are PUT and BXM (unhedged, monthly) and VPD/VPN (VIX futures). Stage 3 builds the
-  stream from option settlements and uses PUT/BXM as the cross-check; a vendor series, if found, is a
-  second cross-check and never the fit data (rule 6).
-- **How deep is MES-option history on GLBX?** MES options list from 2020. Stage 3 builds the *index* from
-  ES options (history from mid-2010) with unit sizing and trades it in MES options; stage 1 confirms
-  both depths with a priced request.
-- **Where do VIX futures settlements come from?** Confirm whether the vendor carries CFE; Cboe's own
-  historical files are the fallback. Needed only for the VIX-future arm of stage 3.
-- **Constant or VRP-conditioned mean for equity?** The variance premium is one of the few documented
-  predictors of index returns at quarterly horizons. Stage 5 tests it against the constant prior under
-  the identifiability rule; low prior weight, pre-registered.
-- **The loss cap D and the Kelly fraction.** Set in stage 5 from the bootstrap's worst intervals and the
-  broker's margin, not chosen by taste. Half Kelly is the starting point.
+- **Micro yield futures (stage 1–2).** Listed 2021, cash-settled on a yield at about $10 a basis point. Stage 1
+  confirms the symbols and depth. Stage 2 measures their daily tracking against ZN. If tracking fails,
+  duration trades in ZN, whose notional is ~2× NAV, and the whole-contract rule decides whether a ZN
+  position is ever worth holding at $50k.
+- **Option spreads at settlement (stage 1).** Whether `statistics` carries a bid–ask for ES/MES options.
+  If not, a quote schema sampled near 15:00 CT is priced and pulled.
+- **Gate power (stage 3).** The one conditional-mean test (VRP on the short-variance mean) has about 130
+  non-overlapping months in fit. Its threshold is set from a power calculation written before it is run,
+  not a bare t ≥ 3.
+- **Settlement vs live fill (stage 5).** The backtest fills at settlement. Live orders go in
+  after 15:00 CT, and Treasury futures settle at 14:00 CT. The gap is a cost the walk measures and the
+  cost model must cover.
