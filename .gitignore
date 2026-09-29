@@ -1,0 +1,10 @@
+# reproducible from data + artifacts; never committed
+runs/
+# data files live under /home/bread/wo-data; only the catalogue is committed
+data/*
+!data/catalogue.json
+# python
+research/.venv/
+research/**/__pycache__/
+*.pyc
+.env
